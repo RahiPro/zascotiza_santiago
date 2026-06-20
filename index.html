@@ -1711,14 +1711,36 @@ function searchMapAddress() {
   // ── Proveedor 2: Photon (Komoot) — respaldo si Nominatim falla ──
   // Usa los mismos datos de OpenStreetMap pero con una API distinta;
   // sirve como respaldo cuando el WebView del APK bloquea Nominatim.
-  const searchPhoton = () => {
-    let url = `https://photon.komoot.io/api/?q=${encodeURIComponent(fullQuery)}&limit=1&lang=es`;
-    if (bbox) url += `&bbox=${bbox.left},${bbox.bottom},${bbox.right},${bbox.top}`;
+  // Photon es más estricto con bbox/queries largas, así que reintenta en capas
+  // cada vez más simples antes de darse por vencido.
+  const fetchPhoton = (queryText, useBbox) => {
+    let url = `https://photon.komoot.io/api/?q=${encodeURIComponent(queryText)}&limit=1&lang=es`;
+    if (useBbox && bbox) {
+      const left   = bbox.left.toFixed(6);
+      const bottom = bbox.bottom.toFixed(6);
+      const right  = bbox.right.toFixed(6);
+      const top    = bbox.top.toFixed(6);
+      url += `&bbox=${left},${bottom},${right},${top}`;
+    }
     return fetch(url, { headers: { 'Accept': 'application/json' } })
       .then(r => { if (!r.ok) throw new Error('photon_http_' + r.status); return r.json(); })
       .then(data => {
         const feats = (data && data.features) || [];
         return feats.map(f => ({ lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] }));
+      });
+  };
+
+  const searchPhoton = () => {
+    // Capa 1: query completa + bbox del municipio.
+    return fetchPhoton(fullQuery, true)
+      .catch(() => {
+        // Capa 2: misma query, sin bbox (por si el bbox es lo que causa el 400).
+        return fetchPhoton(fullQuery, false);
+      })
+      .catch(() => {
+        // Capa 3: query simplificada (solo lo escrito por el usuario + municipio, sin repetir provincia/país).
+        const simpleQuery = mun ? (q + ', ' + mun.name) : q;
+        return fetchPhoton(simpleQuery, false);
       });
   };
 
