@@ -1682,50 +1682,66 @@ function searchMapAddress() {
   if (btn) { btn.disabled = true; btn.innerHTML = 'Buscando…'; }
 
   // Si hay un municipio seleccionado, acota la búsqueda a esa zona:
-  // se agrega su nombre al texto y se limita geográficamente con un viewbox.
+  // se agrega su nombre al texto y se limita geográficamente con un viewbox/bbox.
   const mun = mapActiveMunicipio;
   const contextLabel = mun ? mun.name + ', Santiago de Cuba, Cuba' : 'Santiago de Cuba, Cuba';
   const fullQuery = q + ', ' + contextLabel;
 
   // ~0.18° ≈ 20 km de radio alrededor del centro del municipio.
   const RADIUS_DEG = 0.18;
-  let viewboxParams = '';
-  if (mun) {
-    const left   = mun.lng - RADIUS_DEG;
-    const right  = mun.lng + RADIUS_DEG;
-    const top    = mun.lat + RADIUS_DEG;
-    const bottom = mun.lat - RADIUS_DEG;
-    viewboxParams = `&viewbox=${left},${top},${right},${bottom}&bounded=1`;
-  }
+  const bbox = mun ? {
+    left:   mun.lng - RADIUS_DEG,
+    right:  mun.lng + RADIUS_DEG,
+    top:    mun.lat + RADIUS_DEG,
+    bottom: mun.lat - RADIUS_DEG
+  } : null;
 
-  const doSearch = (params, strict) => fetch(
+  // ── Proveedor 1: Nominatim (OpenStreetMap) ──────────────────
+  const searchNominatim = (params, strict) => fetch(
     `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(fullQuery)}&format=json&limit=1&accept-language=es${params}`,
     { headers: { 'Accept': 'application/json' } }
   )
-    .then(r => { if (!r.ok) throw new Error('http_error'); return r.json(); })
+    .then(r => { if (!r.ok) throw new Error('nominatim_http_' + r.status); return r.json(); })
     .then(results => {
-      if (results && results.length) return results;
-      if (strict) {
-        // Sin resultados dentro del municipio: reintenta en toda la provincia.
-        return doSearch('', false);
-      }
-      return results;
+      if (results && results.length) return results.map(r => ({ lat: r.lat, lon: r.lon }));
+      if (strict) return searchNominatim('', false); // reintenta sin acotar al municipio
+      return [];
     });
 
-  doSearch(viewboxParams, !!mun)
+  // ── Proveedor 2: Photon (Komoot) — respaldo si Nominatim falla ──
+  // Usa los mismos datos de OpenStreetMap pero con una API distinta;
+  // sirve como respaldo cuando el WebView del APK bloquea Nominatim.
+  const searchPhoton = () => {
+    let url = `https://photon.komoot.io/api/?q=${encodeURIComponent(fullQuery)}&limit=1&lang=es`;
+    if (bbox) url += `&bbox=${bbox.left},${bbox.bottom},${bbox.right},${bbox.top}`;
+    return fetch(url, { headers: { 'Accept': 'application/json' } })
+      .then(r => { if (!r.ok) throw new Error('photon_http_' + r.status); return r.json(); })
+      .then(data => {
+        const feats = (data && data.features) || [];
+        return feats.map(f => ({ lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] }));
+      });
+  };
+
+  const viewboxParams = bbox ? `&viewbox=${bbox.left},${bbox.top},${bbox.right},${bbox.bottom}&bounded=1` : '';
+
+  searchNominatim(viewboxParams, !!mun)
+    .catch(err => {
+      console.warn('Nominatim falló, probando Photon:', err);
+      return searchPhoton();
+    })
     .then(results => {
       if (!results || !results.length) {
         const zona = mun ? ' en ' + mun.name : '';
         alert('No se encontró esa dirección' + zona + '. Intenta con otro nombre o toca el mapa directamente.');
         return;
       }
-      const { lat, lon } = results[0];
-      const latF = parseFloat(lat), lngF = parseFloat(lon);
+      const latF = parseFloat(results[0].lat), lngF = parseFloat(results[0].lon);
       leafletMap.setView([latF, lngF], 17);
       placeMarker(latF, lngF);
     })
-    .catch(() => {
-      alert('No se pudo buscar la dirección. Revisa tu conexión a internet o toca el mapa directamente para seleccionar el punto.');
+    .catch(err => {
+      console.error('Búsqueda de dirección falló por completo:', err);
+      alert('No se pudo buscar la dirección (' + (err && err.message ? err.message : 'error de red') + '). Toca el mapa directamente para seleccionar el punto.');
     })
     .finally(() => {
       if (btn) { btn.disabled = false; btn.innerHTML = originalBtnHtml; }
